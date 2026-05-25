@@ -172,6 +172,27 @@ export default function App() {
     });
   }
 
+  function obterFornecedorHistorico(h) {
+    const destino = String(h.destino || "").toUpperCase();
+    const status = String(h.status_movimento || "").toUpperCase();
+
+    const movimentosComFornecedor = [
+      "RECAPAGEM",
+      "CONSERTO",
+      "GARANTIA",
+    ];
+
+    const ehMovimentoFornecedor =
+      movimentosComFornecedor.includes(destino) ||
+      movimentosComFornecedor.includes(status);
+
+    if (!ehMovimentoFornecedor) {
+      return "-";
+    }
+
+    return h.observacao || "-";
+  }
+
   function sair() {
     localStorage.removeItem("usuarioLogado");
     setUsuarioLogado(null);
@@ -942,6 +963,7 @@ export default function App() {
                   <option value="VOLPE">VOLPE</option>
                   <option value="NILCAP">NILCAP</option>
                   <option value="FM PNEUS">FM PNEUS</option>
+                  <option value="COSMAR">COSMAR</option>
                 </select>
               ) : formSaida.destino === "CONSERTO" ? (
                 <select
@@ -1197,6 +1219,7 @@ export default function App() {
                       <th>KM Saída</th>
                       <th>KM Rodado</th>
                       <th>Status</th>
+                      <th>Fornecedor</th>
                     </tr>
                   </thead>
 
@@ -1211,6 +1234,7 @@ export default function App() {
                         <td>{h.km_saida || "-"}</td>
                         <td>{h.km_rodado || "-"}</td>
                         <td>{h.status_movimento}</td>
+                        <td>{obterFornecedorHistorico(h)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1376,6 +1400,7 @@ export default function App() {
                   <option value="VOLPE">VOLPE</option>
                   <option value="NILCAP">NILCAP</option>
                   <option value="FM PNEUS">FM PNEUS</option>
+                  <option value="COSMAR">COSMAR</option>
                 </select>
               ) : formStatus.novo_status === "CONSERTO" ? (
                 <select

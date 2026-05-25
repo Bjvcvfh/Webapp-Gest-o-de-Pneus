@@ -139,6 +139,83 @@ def obter_data_movimento(data_movimento: str = ""):
 
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def validar_km_historico_veiculo(cursor, veiculo_id, data_movimento, km_informado):
+    """
+    Valida se o KM informado respeita a ordem histórica da placa.
+    Para datas anteriores, o KM não pode ser maior que KM futuro.
+    Para datas posteriores, o KM não pode ser menor que KM passado.
+    """
+
+    # Maior KM já informado em data anterior ou igual
+    km_anterior = cursor.execute("""
+        SELECT MAX(km) AS km_max
+        FROM (
+            SELECT km_entrada AS km
+            FROM movimentacoes
+            WHERE veiculo_id = ?
+            AND data_entrada <= ?
+            AND km_entrada IS NOT NULL
+
+            UNION ALL
+
+            SELECT km_saida AS km
+            FROM movimentacoes
+            WHERE veiculo_id = ?
+            AND data_saida <= ?
+            AND km_saida IS NOT NULL
+        )
+    """, (
+        veiculo_id,
+        data_movimento,
+        veiculo_id,
+        data_movimento
+    )).fetchone()
+
+    if km_anterior and km_anterior["km_max"] is not None:
+        if km_informado < km_anterior["km_max"]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"O KM informado ({km_informado}) é menor que um KM já registrado "
+                    f"anteriormente para esta placa ({km_anterior['km_max']})."
+                )
+            )
+
+    # Menor KM já informado em data posterior ou igual
+    km_posterior = cursor.execute("""
+        SELECT MIN(km) AS km_min
+        FROM (
+            SELECT km_entrada AS km
+            FROM movimentacoes
+            WHERE veiculo_id = ?
+            AND data_entrada >= ?
+            AND km_entrada IS NOT NULL
+
+            UNION ALL
+
+            SELECT km_saida AS km
+            FROM movimentacoes
+            WHERE veiculo_id = ?
+            AND data_saida >= ?
+            AND km_saida IS NOT NULL
+        )
+    """, (
+        veiculo_id,
+        data_movimento,
+        veiculo_id,
+        data_movimento
+    )).fetchone()
+
+    if km_posterior and km_posterior["km_min"] is not None:
+        if km_informado > km_posterior["km_min"]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"O KM informado ({km_informado}) é maior que um KM já registrado "
+                    f"em data posterior para esta placa ({km_posterior['km_min']})."
+                )
+            )
+
 def formatar_data_br_sem_hora(data):
     if not data:
         return None
@@ -485,6 +562,16 @@ def lancar_pneu(lancamento: LancamentoCreate):
             detail="Veículo não encontrado."
         )
 
+    try:
+        validar_km_historico_veiculo(
+            cursor,
+            lancamento.veiculo_id,
+            data_atual,
+            lancamento.km_entrada
+        )
+    except HTTPException as e:
+        conn.close()
+        raise e
     # -------------------------
     # Bloqueia veículo inativo
     # -------------------------
@@ -688,20 +775,13 @@ def registrar_saida_pneu(saida: SaidaPneuCreate):
             km_saida = ?,
             km_rodado = ?,
             destino = ?,
-            status_movimento = 'FECHADO',
-            observacao = CASE
-                WHEN observacao IS NULL OR observacao = ''
-                THEN ?
-                ELSE observacao || ' | Saída: ' || ?
-            END
+            status_movimento = 'FECHADO'
         WHERE id = ?
     """, (
         data_atual,
         saida.km_saida,
         km_rodado,
         destino,
-        observacao_saida,
-        observacao_saida,
         mov_aberta["id"]
     ))
 
@@ -710,7 +790,8 @@ def registrar_saida_pneu(saida: SaidaPneuCreate):
         "SANTA CRUZ",
         "VOLPE",
         "NILCAP",
-        "FM PNEUS"
+        "FM PNEUS",
+        "COSMAR"
     ]
 
     consertos_permitidos = [
@@ -761,13 +842,43 @@ def registrar_saida_pneu(saida: SaidaPneuCreate):
 
     cursor.execute("""
         UPDATE pneus
-        SET status = ?
+        SET status = ?,
+            observacao = CASE
+                WHEN ? IS NULL OR TRIM(?) = ''
+                THEN observacao
+                ELSE ?
+            END
         WHERE id = ?
     """, (
         novo_status,
+        observacao_saida,
+        observacao_saida,
+        observacao_saida,
         saida.pneu_id
     ))
 
+    if novo_status in ["RECAPAGEM", "CONSERTO", "GARANTIA"]:
+        cursor.execute("""
+            INSERT INTO movimentacoes
+            (
+                pneu_id,
+                veiculo_id,
+                posicao,
+                data_entrada,
+                km_entrada,
+                destino,
+                status_movimento,
+                observacao
+            )
+            VALUES (?, NULL, NULL, ?, 0, ?, ?, ?)
+        """, (
+            saida.pneu_id,
+            data_atual,
+            novo_status,
+            novo_status,
+            observacao_saida
+        ))
+    
     # Atualiza o KM atual do veículo com o KM informado na saída
     if mov_aberta["veiculo_id"]:
         cursor.execute("""
@@ -811,7 +922,8 @@ def alterar_status_pneu(dados: AlterarStatusPneuCreate):
         "SANTA CRUZ",
         "VOLPE",
         "NILCAP",
-        "FM PNEUS"
+        "FM PNEUS",
+        "COSMAR"
     ]
 
     consertos_permitidos = [
@@ -933,24 +1045,24 @@ def alterar_status_pneu(dados: AlterarStatusPneuCreate):
         SET status = ?,
             custos_adicionais = COALESCE(custos_adicionais, 0) + ?,
             observacao = CASE
-                WHEN observacao IS NULL OR observacao = ''
-                THEN ?
-                ELSE observacao || ' | Status: ' || ?
+                WHEN ? IS NULL OR TRIM(?) = ''
+                THEN observacao
+                ELSE ?
             END
         WHERE id = ?
     """, (
         novo_status,
         custo_adicional,
-        dados.observacao,
-        dados.observacao,
+        observacao,
+        observacao,
+        observacao,
         dados.pneu_id
     ))
     
-    observacao_historico = (
-        f"{dados.observacao} | Custo adicional: R$ {custo_adicional:.2f}"
-        if custo_adicional > 0
-        else dados.observacao
-    )
+    observacao_historico = observacao
+
+    if custo_adicional > 0:
+        observacao_historico = f"{observacao} | Custo adicional: R$ {custo_adicional:.2f}"
     
     # Grava a alteração no histórico do pneu
     cursor.execute("""
@@ -1526,6 +1638,14 @@ def exportar_excel():
             m.km_rodado,
             m.motivo_saida,
             m.destino,
+
+            CASE
+                WHEN m.destino IN ('RECAPAGEM', 'CONSERTO', 'GARANTIA')
+                OR m.status_movimento IN ('RECAPAGEM', 'CONSERTO', 'GARANTIA')
+                THEN m.observacao
+                ELSE ''
+            END AS fornecedor,
+
             m.status_movimento
         FROM movimentacoes m
         JOIN pneus p ON p.id = m.pneu_id
